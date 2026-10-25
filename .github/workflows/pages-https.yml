@@ -1,8 +1,6 @@
 name: Pages custom domain HTTPS
 
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -24,11 +22,13 @@ jobs:
 
       - name: Enable Pages and set silvasfusspflege.de
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
           DOMAIN="silvasfusspflege.de"
+
+          echo "Using token source: $([[ -n "${{ secrets.PAGES_ADMIN_TOKEN }}" ]] && echo PAGES_ADMIN_TOKEN || echo GITHUB_TOKEN)"
 
           create_pages() {
             local branch="$1"
@@ -40,19 +40,9 @@ jobs:
               -f "source[path]=${path}"
           }
 
-          update_pages() {
-            gh api --method PUT "repos/${REPO}/pages" \
-              -H "Accept: application/vnd.github+json" \
-              -f cname="${DOMAIN}" \
-              -F https_enforced=false \
-              -f build_type='legacy' \
-              -f 'source[branch]=master' \
-              -f 'source[path]=/docs'
-          }
-
           echo "Current Pages state (if any):"
           if gh api "repos/${REPO}/pages"; then
-            echo "Pages site already exists; updating custom domain."
+            echo "Pages site already exists."
           else
             echo "Pages site missing; creating from master /docs."
             if ! create_pages master /docs; then
@@ -61,18 +51,22 @@ jobs:
             fi
           fi
 
-          echo "Setting custom domain ${DOMAIN} (clears stale cert mapping)."
-          update_pages || {
-            echo "PUT with source failed; trying cname-only update."
+          echo "Setting custom domain ${DOMAIN}."
+          if ! gh api --method PUT "repos/${REPO}/pages" \
+            -H "Accept: application/vnd.github+json" \
+            -f cname="${DOMAIN}" \
+            -F https_enforced=false \
+            -f build_type='legacy' \
+            -f 'source[branch]=master' \
+            -f 'source[path]=/docs'; then
             gh api --method PUT "repos/${REPO}/pages" \
               -H "Accept: application/vnd.github+json" \
               -f cname="${DOMAIN}" \
               -F https_enforced=false
-          }
+          fi
 
           echo "Triggering DNS health check."
           gh api "repos/${REPO}/pages/health" || true
-
           echo "Pages config after update:"
           gh api "repos/${REPO}/pages"
 
@@ -92,7 +86,7 @@ jobs:
 
       - name: Wait for custom-domain certificate and enforce HTTPS
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
@@ -105,20 +99,17 @@ jobs:
             echo "Certificate state: ${state} (attempt ${i})"
 
             if [[ "${state}" == "approved" || "${state}" == "uploaded" || "${state}" == "issued" ]]; then
-              if gh api --method PUT "repos/${REPO}/pages" \
+              gh api --method PUT "repos/${REPO}/pages" \
                 -H "Accept: application/vnd.github+json" \
                 -f cname="${DOMAIN}" \
-                -F https_enforced=true; then
-                echo "https_enforced enabled"
-              else
-                echo "Certificate ready but https_enforced could not be set yet"
-              fi
+                -F https_enforced=true
+              echo "https_enforced enabled"
               gh api "repos/${REPO}/pages"
               exit 0
             fi
 
             if [[ "${state}" == "errored" ]]; then
-              echo "Certificate issuance errored; retrying domain save to retrigger."
+              echo "Certificate issuance errored; retrying domain save."
               gh api --method PUT "repos/${REPO}/pages" \
                 -H "Accept: application/vnd.github+json" \
                 -f cname="${DOMAIN}" \
